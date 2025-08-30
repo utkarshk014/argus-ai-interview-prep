@@ -27,6 +27,8 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
   const [interimTranscript, setInterimTranscript] = useState("");
   const [isSupported, setIsSupported] = useState(false);
   const recognitionRef = useRef<any>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isManualStopRef = useRef(false);
 
   // Check if speech recognition is supported
   useEffect(() => {
@@ -49,19 +51,41 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
 
     const recognition = recognitionRef.current;
 
-    // Configure recognition settings
+    // Configure recognition settings for faster response
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
+    recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
       console.log("🎤 Speech recognition started");
       setIsRecording(true);
+      isManualStopRef.current = false;
     };
 
     recognition.onend = () => {
       console.log("🔇 Speech recognition ended");
       setIsRecording(false);
+      
+      // Clear any pending silence timer
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      
+      // Auto-restart if not manually stopped (for continuous conversation)
+      if (!isManualStopRef.current) {
+        console.log("🔄 Auto-restarting speech recognition");
+        setTimeout(() => {
+          if (recognitionRef.current && !isManualStopRef.current) {
+            try {
+              recognitionRef.current.start();
+            } catch (error) {
+              console.log("Recognition already running or error:", error);
+            }
+          }
+        }, 500);
+      }
     };
 
     recognition.onresult = (event: any) => {
@@ -77,20 +101,67 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
         }
       }
 
+      // Clear previous silence timer since user is speaking
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+
       if (finalTranscript) {
         const timestampedText = `[${new Date().toLocaleTimeString()}] ${finalTranscript.trim()}`;
-        console.log("📝 Transcribed:", timestampedText);
+        console.log("📝 Final Transcript:", timestampedText);
 
         setTranscript((prev) => prev + (prev ? "\n" : "") + timestampedText);
         setInterimTranscript("");
+
+        // Start silence detection timer for faster response
+        silenceTimerRef.current = setTimeout(() => {
+          console.log("⏰ Silence detected - stopping recognition for processing");
+          if (!isManualStopRef.current) {
+            isManualStopRef.current = true;
+            recognition.stop();
+          }
+        }, 1500); // Reduced from default to 1.5 seconds of silence
       } else {
         setInterimTranscript(interimText);
+        
+        // If we have interim results, reset silence timer
+        if (interimText.trim()) {
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+          }
+          
+          // Start new silence timer
+          silenceTimerRef.current = setTimeout(() => {
+            console.log("⏰ Interim silence detected - processing");
+            if (!isManualStopRef.current) {
+              isManualStopRef.current = true;
+              recognition.stop();
+            }
+          }, 2000); // Slightly longer for interim results
+        }
       }
     };
 
     recognition.onerror = (event: any) => {
       console.error("🚨 Speech recognition error:", event.error);
+      
+      // Clear any pending timers
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      
       setIsRecording(false);
+      
+      // Auto-restart on certain errors (like network issues)
+      if (event.error === 'network' || event.error === 'service-not-allowed') {
+        setTimeout(() => {
+          if (!isManualStopRef.current) {
+            startRecording();
+          }
+        }, 2000);
+      }
     };
   }, []);
 
@@ -98,7 +169,11 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
     try {
       // Request microphone permission first
       await navigator.mediaDevices.getUserMedia({ audio: true });
-      recognitionRef.current?.start();
+      
+      if (recognitionRef.current) {
+        isManualStopRef.current = false;
+        recognitionRef.current.start();
+      }
     } catch (error) {
       console.error("❌ Microphone access denied:", error);
       alert("Microphone access is required for speech recognition");
@@ -106,7 +181,17 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
   }, []);
 
   const stopRecording = useCallback(() => {
-    recognitionRef.current?.stop();
+    isManualStopRef.current = true;
+    
+    // Clear any pending silence timer
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
   }, []);
 
   const toggleRecording = useCallback(() => {
@@ -121,6 +206,16 @@ export const useSpeechRecognition = (): UseSpeechRecognitionReturn => {
     setTranscript("");
     setInterimTranscript("");
     console.clear();
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+      isManualStopRef.current = true;
+    };
   }, []);
 
   return {
