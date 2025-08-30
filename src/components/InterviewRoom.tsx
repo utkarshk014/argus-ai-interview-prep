@@ -357,17 +357,6 @@ const InterviewRoom: React.FC = () => {
                 </div>
               </div>
             </div>
-
-            {/* AI Response Text */}
-            {gemini.aiResponse && (
-              <div className="absolute top-4 left-4 right-4">
-                <div className="bg-black/80 rounded-lg p-3 max-h-32 overflow-y-auto">
-                  <p className="text-sm text-gray-200 leading-relaxed">
-                    {gemini.aiResponse}
-                  </p>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>
@@ -375,7 +364,7 @@ const InterviewRoom: React.FC = () => {
       {/* Bottom Controls */}
       <div className="bg-gray-800 border-t border-gray-700 p-4">
         <div className="flex items-center justify-center gap-4">
-          <button
+          {/* <button
             onClick={speech.toggleRecording}
             className={`p-4 rounded-full transition-all ${
               speech.isRecording
@@ -388,7 +377,7 @@ const InterviewRoom: React.FC = () => {
             ) : (
               <MicOff className="w-6 h-6" />
             )}
-          </button>
+          </button> */}
 
           <button
             onClick={endMeeting}

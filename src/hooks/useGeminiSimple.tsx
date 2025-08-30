@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface UseGeminiSimpleReturn {
@@ -21,6 +21,10 @@ export const useGeminiSimple = (): UseGeminiSimpleReturn => {
   const [genAI, setGenAI] = useState<GoogleGenerativeAI | null>(null);
   const [model, setModel] = useState<any>(null);
   const [chat, setChat] = useState<any>(null);
+  
+  // Refs to manage audio cleanup
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   const connect = useCallback(async () => {
     try {
@@ -52,7 +56,7 @@ export const useGeminiSimple = (): UseGeminiSimpleReturn => {
 
       setChat(chatSession);
       setIsConnected(true);
-      console.log('🤖 Connected to Gemini');
+      console.log('Connected to Gemini');
 
       // Send initial greeting
       setTimeout(() => {
@@ -60,49 +64,55 @@ export const useGeminiSimple = (): UseGeminiSimpleReturn => {
       }, 500);
 
     } catch (error) {
-      console.error('❌ Failed to connect to Gemini:', error);
+      console.error('Failed to connect to Gemini:', error);
       setIsConnected(false);
     }
   }, []);
 
   const sendInitialGreeting = useCallback(async (chatSession: any) => {
     try {
-      setIsAISpeaking(true);
+      setIsProcessing(true);
       const result = await chatSession.sendMessage("Please greet me and ask how you can help with interview preparation today. Keep it brief and friendly.");
       const response = result.response;
       const text = response.text();
       
       setAiResponse(text);
-      console.log('🤖 AI:', text);
+      console.log('AI:', text);
+      
+      setIsProcessing(false);
       
       // Convert to speech and play
       await speakText(text);
       
     } catch (error) {
-      console.error('❌ Error sending initial greeting:', error);
+      console.error('Error sending initial greeting:', error);
+      setIsProcessing(false);
       setIsAISpeaking(false);
     }
   }, []);
 
   const sendMessage = useCallback(async (message: string) => {
     if (!chat) {
-      console.error('❌ Not connected to Gemini');
+      console.error('Not connected to Gemini');
       return;
     }
 
     try {
-      setIsProcessing(true);
-      setIsAISpeaking(false); // Reset speaking state
-      setAiResponse('🤔 Thinking...');
+      // Stop any current audio immediately
+      stopCurrentAudio();
       
-      console.log('📤 Sending to Gemini:', message);
+      setIsProcessing(true);
+      setIsAISpeaking(false);
+      setAiResponse('Thinking...');
+      
+      console.log('Sending to Gemini:', message);
       
       const result = await chat.sendMessage(message);
       const response = result.response;
       const text = response.text();
       
       setAiResponse(text);
-      console.log('🤖 AI Response:', text);
+      console.log('AI Response:', text);
       
       setIsProcessing(false);
       
@@ -110,72 +120,181 @@ export const useGeminiSimple = (): UseGeminiSimpleReturn => {
       await speakText(text);
       
     } catch (error) {
-      console.error('❌ Failed to send message:', error);
+      console.error('Failed to send message:', error);
       setIsProcessing(false);
       setIsAISpeaking(false);
-      setAiResponse('❌ Sorry, I encountered an error. Please try again.');
+      setAiResponse('Sorry, I encountered an error. Please try again.');
     }
   }, [chat]);
 
+  // Function to stop any current audio
+  const stopCurrentAudio = useCallback(() => {
+    // Stop ElevenLabs audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.currentTime = 0;
+      currentAudioRef.current = null;
+    }
+    
+    // Stop browser TTS
+    if (currentUtteranceRef.current) {
+      speechSynthesis.cancel();
+      currentUtteranceRef.current = null;
+    }
+    
+    setIsAISpeaking(false);
+  }, []);
+
   const speakText = useCallback(async (text: string) => {
     try {
-      // Check if speech synthesis is supported
-      if (!('speechSynthesis' in window)) {
-        console.warn('Speech synthesis not supported');
-        setIsAISpeaking(false);
-        return;
+      // Stop any current audio first
+      stopCurrentAudio();
+
+      const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY;
+      
+      // Try ElevenLabs first
+      if (apiKey) {
+        try {
+          console.log('Using ElevenLabs TTS');
+          
+          const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM', {
+            method: 'POST',
+            headers: {
+              'Accept': 'audio/mpeg',
+              'Content-Type': 'application/json',
+              'xi-api-key': apiKey,
+            },
+            body: JSON.stringify({
+              text: text,
+              model_id: 'eleven_monolingual_v1',
+              voice_settings: {
+                stability: 0.6,
+                similarity_boost: 0.8,
+                style: 0.2,
+                use_speaker_boost: true
+              },
+            }),
+          });
+
+          if (!response.ok) {
+            if (response.status === 401) {
+              console.warn('ElevenLabs API key invalid, falling back to browser TTS');
+            } else if (response.status === 402) {
+              console.warn('ElevenLabs quota exceeded, falling back to browser TTS');
+            } else {
+              console.warn(`ElevenLabs API error ${response.status}, falling back to browser TTS`);
+            }
+            throw new Error(`ElevenLabs API error: ${response.status}`);
+          }
+
+          // Convert response to audio blob
+          const audioBlob = await response.blob();
+          const audioUrl = URL.createObjectURL(audioBlob);
+          const audio = new Audio(audioUrl);
+          
+          // Store reference for cleanup
+          currentAudioRef.current = audio;
+
+          // Set playback rate for better pacing
+          audio.playbackRate = 0.95; // Slightly slower for better clarity
+
+          audio.oncanplaythrough = () => {
+            console.log('AI started speaking with ElevenLabs');
+            setIsAISpeaking(true);
+          };
+
+          audio.onended = () => {
+            console.log('AI finished speaking');
+            setIsAISpeaking(false);
+            URL.revokeObjectURL(audioUrl);
+            currentAudioRef.current = null;
+          };
+
+          audio.onerror = (error) => {
+            console.error('Audio playback error:', error);
+            setIsAISpeaking(false);
+            URL.revokeObjectURL(audioUrl);
+            currentAudioRef.current = null;
+            // Fallback to browser TTS
+            speakWithBrowserTTS(text);
+          };
+
+          // Play the audio
+          await audio.play();
+          return; // Success, exit function
+
+        } catch (elevenLabsError) {
+          console.warn('ElevenLabs failed, using browser TTS:', elevenLabsError);
+          // Fall through to browser TTS
+        }
       }
 
-      // Cancel any ongoing speech
-      speechSynthesis.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      
-      // Configure voice settings
-      utterance.rate = 0.9;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-      
-      // Try to use a nice voice
-      const voices = speechSynthesis.getVoices();
-      const preferredVoice = voices.find(voice => 
-        voice.name.includes('Google') || 
-        voice.name.includes('Enhanced') ||
-        voice.lang.startsWith('en-')
-      );
-      
-      if (preferredVoice) {
-        utterance.voice = preferredVoice;
-      }
-
-      utterance.onstart = () => {
-        console.log('🗣️ AI started speaking');
-        setIsAISpeaking(true);
-      };
-
-      utterance.onend = () => {
-        console.log('🔇 AI finished speaking');
-        setIsAISpeaking(false);
-      };
-
-      utterance.onerror = (error) => {
-        console.error('❌ Speech synthesis error:', error);
-        setIsAISpeaking(false);
-      };
-
-      speechSynthesis.speak(utterance);
+      // Fallback to browser TTS
+      speakWithBrowserTTS(text);
 
     } catch (error) {
-      console.error('❌ Error in text-to-speech:', error);
+      console.error('Error in text-to-speech:', error);
       setIsAISpeaking(false);
     }
+  }, [stopCurrentAudio]);
+
+  // Fallback browser TTS function
+  const speakWithBrowserTTS = useCallback((text: string) => {
+    if (!('speechSynthesis' in window)) {
+      console.warn('Speech synthesis not supported');
+      setIsAISpeaking(false);
+      return;
+    }
+
+    console.log('Using browser TTS');
+    
+    // Cancel any ongoing speech
+    speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    currentUtteranceRef.current = utterance;
+    
+    // Configure voice settings for better quality
+    utterance.rate = 0.85; // Slower for better clarity
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    
+    // Try to use the best available voice
+    const voices = speechSynthesis.getVoices();
+    const preferredVoice = voices.find(voice => 
+      voice.name.includes('Google') || 
+      voice.name.includes('Enhanced') ||
+      voice.name.includes('Premium') ||
+      (voice.lang.startsWith('en-') && voice.name.includes('Female'))
+    ) || voices.find(voice => voice.lang.startsWith('en-'));
+    
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    utterance.onstart = () => {
+      console.log('AI started speaking with browser TTS');
+      setIsAISpeaking(true);
+    };
+
+    utterance.onend = () => {
+      console.log('AI finished speaking');
+      setIsAISpeaking(false);
+      currentUtteranceRef.current = null;
+    };
+
+    utterance.onerror = (error) => {
+      console.error('Speech synthesis error:', error);
+      setIsAISpeaking(false);
+      currentUtteranceRef.current = null;
+    };
+
+    speechSynthesis.speak(utterance);
   }, []);
 
   const disconnect = useCallback(() => {
-    // Cancel any ongoing speech
-    if ('speechSynthesis' in window) {
-      speechSynthesis.cancel();
-    }
+    // Stop any current audio
+    stopCurrentAudio();
     
     setGenAI(null);
     setModel(null);
@@ -183,8 +302,8 @@ export const useGeminiSimple = (): UseGeminiSimpleReturn => {
     setIsConnected(false);
     setIsAISpeaking(false);
     setAiResponse('');
-    console.log('🤖 Disconnected from Gemini');
-  }, []);
+    console.log('Disconnected from Gemini');
+  }, [stopCurrentAudio]);
 
   return {
     isConnected,
